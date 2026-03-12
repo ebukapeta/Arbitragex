@@ -128,7 +128,7 @@ const distPath = path.join(__dirname, '..', 'dist');
 app.use(express.static(distPath));
 
 // All non-API routes serve index.html (React SPA routing)
-app.get('*', (req, res) => {
+app.get('/{*path}', (req, res) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({ error: 'API route not found' });
   }
