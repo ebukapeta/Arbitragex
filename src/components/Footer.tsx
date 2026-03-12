@@ -86,13 +86,11 @@ export const Footer: React.FC = () => (
         </div>
       </div>
 
-      <div className="border-t border-gray-700/40 mt-6 pt-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-gray-600">
+        <div className="border-t border-gray-700/40 mt-6 pt-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-gray-600">
         <span>© 2024 ArbitrageX — Cross-Exchange Arbitrage Platform</span>
-        <div className="flex flex-wrap items-center gap-2 sm:gap-4">
-          <span>Prices simulated for demonstration</span>
-          <span className="text-violet-600 font-mono hidden sm:inline">DEPLOYMENT.md in project root</span>
-        </div>
+        <span>Built for professional cross-exchange arbitrage trading</span>
       </div>
     </div>
   </footer>
 );
+    
