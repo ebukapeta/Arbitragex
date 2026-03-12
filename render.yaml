@@ -1,0 +1,32 @@
+# Render Web Service Configuration for ArbitrageX
+# ─────────────────────────────────────────────────────────────────────────────
+# This file tells Render how to deploy ArbitrageX as a unified Web Service.
+# The Express server serves both the API backend AND the built React frontend.
+#
+# Deploy steps on Render:
+# 1. Push this repo to GitHub
+# 2. Go to render.com → New → Web Service
+# 3. Connect your GitHub repo
+# 4. Render auto-detects this render.yaml
+# 5. Add your ENCRYPTION_KEY environment variable in Render dashboard
+# 6. Click Deploy
+
+services:
+  - type: web
+    name: arbitragex
+    runtime: node
+    plan: starter          # $7/month — always-on (required for trading bot)
+    buildCommand: npm install && npm run build
+    startCommand: node server/index.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+      - key: ENCRYPTION_KEY
+        generateValue: true   # Render auto-generates a secure random value
+      - key: PERSIST_KEYS
+        value: "true"         # Persist API keys across server restarts
+      - key: FRONTEND_URL
+        sync: false           # Set this to your Render URL after first deploy
