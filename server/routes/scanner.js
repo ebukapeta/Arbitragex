@@ -16,6 +16,11 @@
 import { Router } from 'express';
 import { keyStore } from '../store/keyStore.js';
 import { getExchangeInstance } from '../exchanges/connector.js';
+import {
+  normaliseNetworks,
+  getCommonNetworks,
+  selectBestNetwork,
+} from '../exchanges/networkNormaliser.js';
 
 export const scannerRouter = Router();
 
@@ -31,30 +36,77 @@ const TAKER_FEES = {
   'Gate.io': 0.20,  // 0.20% standard
 };
 
-// ─── USDT withdrawal fees by network (USD amounts) ────────────────────────────
+// ─── USDT withdrawal fees by canonical network name (USD amounts) ──────────────
 const WITHDRAWAL_FEES_USD = {
-  TRC20:    1.00,
-  ERC20:    4.50,
-  BEP20:    0.80,
-  SOL:      1.00,
-  ARBITRUM: 0.80,
-  OPTIMISM: 0.80,
-  MATIC:    1.00,
-  'AVAX-C': 1.00,
-  KCC:      0.80,
+  TRC20:    1.00,   // Tron — cheapest, most widely supported
+  BEP20:    0.80,   // BNB Smart Chain
+  SOL:      1.00,   // Solana
+  POLYGON:  1.00,   // Polygon PoS
+  ARBITRUM: 0.80,   // Arbitrum One
+  OPTIMISM: 0.80,   // Optimism
+  BASE:     0.50,   // Base — cheapest L2
+  AVAXC:    1.00,   // Avalanche C-Chain
+  KCC:      0.80,   // KuCoin Chain
+  TON:      0.50,   // TON
+  ZKSYNC:   0.80,   // zkSync Era
+  LINEA:    0.80,   // Linea
+  ERC20:    4.50,   // Ethereum — most expensive, avoid if possible
 };
 
-// ─── Networks supported per exchange for USDT ─────────────────────────────────
-const EXCHANGE_NETWORKS = {
-  'Binance': ['TRC20', 'BEP20', 'ERC20', 'SOL', 'ARBITRUM', 'OPTIMISM', 'MATIC', 'AVAX-C'],
-  'Bybit':   ['TRC20', 'BEP20', 'ERC20', 'SOL', 'ARBITRUM', 'OPTIMISM', 'AVAX-C'],
-  'MEXC':    ['TRC20', 'BEP20', 'ERC20', 'SOL', 'ARBITRUM', 'OPTIMISM', 'MATIC', 'AVAX-C'],
-  'HTX':     ['TRC20', 'ERC20', 'BEP20', 'ARBITRUM', 'AVAX-C'],
-  'KuCoin':  ['TRC20', 'ERC20', 'BEP20', 'SOL', 'ARBITRUM', 'MATIC', 'KCC'],
+// ─── Static fallback USDT networks per exchange (canonical form) ───────────────
+// Used when live fetchCurrencies() is unavailable or API keys not connected.
+// All entries are already in canonical form — normaliseNetworks() is applied
+// at runtime so any future edits here do not need to match casing exactly.
+const EXCHANGE_NETWORKS_STATIC = {
+  'Binance': ['TRC20', 'BEP20', 'ERC20', 'SOL', 'ARBITRUM', 'OPTIMISM', 'POLYGON', 'AVAXC'],
+  'Bybit':   ['TRC20', 'BEP20', 'ERC20', 'SOL', 'ARBITRUM', 'OPTIMISM', 'AVAXC'],
+  'MEXC':    ['TRC20', 'BEP20', 'ERC20', 'SOL', 'ARBITRUM', 'OPTIMISM', 'POLYGON', 'AVAXC'],
+  'HTX':     ['TRC20', 'ERC20', 'BEP20', 'ARBITRUM', 'AVAXC'],
+  'KuCoin':  ['TRC20', 'ERC20', 'BEP20', 'SOL', 'ARBITRUM', 'POLYGON', 'KCC'],
   'BitMart': ['TRC20', 'ERC20', 'BEP20', 'SOL'],
   'Bitget':  ['TRC20', 'ERC20', 'BEP20', 'SOL', 'ARBITRUM', 'OPTIMISM'],
-  'Gate.io': ['TRC20', 'ERC20', 'BEP20', 'SOL', 'ARBITRUM', 'OPTIMISM', 'MATIC', 'AVAX-C'],
+  'Gate.io': ['TRC20', 'ERC20', 'BEP20', 'SOL', 'ARBITRUM', 'OPTIMISM', 'POLYGON', 'AVAXC'],
 };
+
+// Cache for live network data fetched from exchange APIs
+// Refreshed every 10 minutes to avoid excessive API calls
+const networkCache = new Map(); // exchange → { networks: string[], fetchedAt: number }
+const NETWORK_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Get canonical USDT networks for an exchange.
+ * Tries live API first, falls back to static list.
+ */
+async function getExchangeNetworks(exchange) {
+  const cached = networkCache.get(exchange);
+  if (cached && Date.now() - cached.fetchedAt < NETWORK_CACHE_TTL) {
+    return cached.networks;
+  }
+
+  try {
+    const ex = getExchangeInstance(exchange);
+    if (ex) {
+      await ex.loadMarkets();
+      const currencies = await ex.fetchCurrencies();
+      const usdt = currencies?.USDT;
+      if (usdt?.networks) {
+        // Extract raw network IDs and normalise them all
+        const rawIds = Object.keys(usdt.networks);
+        const canonical = normaliseNetworks(rawIds);
+        if (canonical.length > 0) {
+          networkCache.set(exchange, { networks: canonical, fetchedAt: Date.now() });
+          return canonical;
+        }
+      }
+    }
+  } catch {
+    // Fall through to static fallback
+  }
+
+  // Use static fallback (already canonical)
+  const fallback = normaliseNetworks(EXCHANGE_NETWORKS_STATIC[exchange] ?? []);
+  return fallback;
+}
 
 // ─── Withdrawal/deposit enabled status per exchange ───────────────────────────
 const WITHDRAWAL_STATUS = {
@@ -78,12 +130,16 @@ const SCAN_PAIRS = [
 ];
 
 /**
- * Find common chains between two exchanges for USDT transfer.
+ * Find common canonical networks between two exchanges for USDT transfer.
+ * Uses live API data with static fallback. Async because it may fetch live data.
  */
-function getCommonChains(buyExchange, sellExchange) {
-  const buyNets  = EXCHANGE_NETWORKS[buyExchange]  ?? [];
-  const sellNets = EXCHANGE_NETWORKS[sellExchange] ?? [];
-  return buyNets.filter(n => sellNets.includes(n));
+async function getCommonChains(buyExchange, sellExchange) {
+  const [buyNets, sellNets] = await Promise.all([
+    getExchangeNetworks(buyExchange),
+    getExchangeNetworks(sellExchange),
+  ]);
+  // getCommonNetworks handles normalisation — both lists are already canonical here
+  return getCommonNetworks(buyNets, sellNets);
 }
 
 /**
@@ -203,14 +259,12 @@ scannerRouter.post('/scan', async (req, res) => {
         const buyFeePct  = TAKER_FEES[buyExchange]  ?? 0.20;
         const sellFeePct = TAKER_FEES[sellExchange] ?? 0.20;
 
-        // Common chains for USDT withdrawal
-        const commonChains = getCommonChains(buyExchange, sellExchange);
+        // Common chains for USDT withdrawal (normalised, live API + static fallback)
+        const commonChains = await getCommonChains(buyExchange, sellExchange);
         const chainCompatible = commonChains.length > 0;
 
-        // Best chain = TRC20 if available (cheapest), else lowest fee network
-        const bestChain = commonChains.includes('TRC20')
-          ? 'TRC20'
-          : commonChains[0] ?? 'TRC20';
+        // Best chain selected by priority: TRC20 > BEP20 > SOL > ... > ERC20
+        const bestChain = selectBestNetwork(commonChains) ?? 'TRC20';
 
         const withdrawalFeeUSD = WITHDRAWAL_FEES_USD[bestChain] ?? 1.00;
 
