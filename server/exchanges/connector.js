@@ -17,6 +17,7 @@
 
 import ccxt from 'ccxt';
 import { keyStore } from '../store/keyStore.js';
+import { normaliseNetwork, selectBestNetwork } from './networkNormaliser.js';
 
 // Cache of authenticated exchange instances
 const instanceCache = new Map();
@@ -247,16 +248,21 @@ export async function fetchUSDTNetworks(exchange) {
     if (!usdt) return [];
 
     const networks = usdt.networks ?? {};
-    return Object.entries(networks).map(([networkId, info]) => ({
-      network:         networkId,
-      label:           info.name || networkId,
-      withdrawFee:     info.fee ?? 1,
-      minWithdraw:     info.limits?.withdraw?.min ?? 10,
-      withdrawEnabled: info.active && info.withdraw,
-      depositEnabled:  info.active && info.deposit,
-      confirmations:   info.confirmations ?? 0,
-      estimatedTime:   getEstimatedTime(networkId),
-    }));
+    return Object.entries(networks).map(([networkId, info]) => {
+      // Normalise raw exchange network ID to canonical form
+      const canonical = normaliseNetwork(networkId);
+      return {
+        network:         canonical,          // canonical form for matching
+        rawNetwork:      networkId,          // original exchange ID for API calls
+        label:           info.name || networkId,
+        withdrawFee:     info.fee ?? 1,
+        minWithdraw:     info.limits?.withdraw?.min ?? 10,
+        withdrawEnabled: info.active !== false && info.withdraw !== false,
+        depositEnabled:  info.active !== false && info.deposit !== false,
+        confirmations:   info.confirmations ?? 0,
+        estimatedTime:   getEstimatedTime(canonical),
+      };
+    });
   } catch (err) {
     console.error(`[Connector] fetchUSDTNetworks error for ${exchange}:`, err.message);
     // Return empty — route will fall back to static data
@@ -264,13 +270,23 @@ export async function fetchUSDTNetworks(exchange) {
   }
 }
 
-function getEstimatedTime(network) {
+function getEstimatedTime(canonicalNetwork) {
   const times = {
-    TRC20: '~1-2 min', ERC20: '~3-5 min', BEP20: '~30 sec',
-    SOL: '~30 sec', ARBITRUM: '~1 min', OPTIMISM: '~1 min',
-    MATIC: '~2 min', 'AVAX-C': '~2 min', KCC: '~30 sec',
+    TRC20:    '~1-2 min',
+    ERC20:    '~3-5 min',
+    BEP20:    '~30 sec',
+    SOL:      '~30 sec',
+    ARBITRUM: '~1 min',
+    OPTIMISM: '~1 min',
+    POLYGON:  '~2 min',
+    AVAXC:    '~2 min',
+    BASE:     '~1 min',
+    KCC:      '~30 sec',
+    TON:      '~1 min',
+    ZKSYNC:   '~1 min',
+    LINEA:    '~2 min',
   };
-  return times[network] ?? '~3-5 min';
+  return times[canonicalNetwork] ?? '~3-5 min';
 }
 
 /**
@@ -316,39 +332,60 @@ export async function placeMarketSell(exchange, symbol, amount) {
 
 /**
  * Withdraw USDT from an exchange to a given address on a given network.
+ *
+ * @param {string} exchange     — exchange name
+ * @param {number} amount       — USDT amount
+ * @param {string} address      — destination wallet address
+ * @param {string} network      — CANONICAL network name (e.g. 'TRC20', 'BEP20')
+ * @param {string} rawNetwork   — exchange's own network ID (from fetchUSDTNetworks rawNetwork field)
+ * @param {string} [tag]        — memo/tag if required
  */
-export async function withdraw(exchange, amount, address, network, tag) {
+export async function withdraw(exchange, amount, address, network, rawNetwork, tag) {
   const ex = getExchangeInstance(exchange);
   if (!ex) throw new Error(`${exchange} not connected`);
 
   const params = {};
 
-  // Exchange-specific withdrawal parameters
+  // Each exchange expects its own network ID format in withdrawal params.
+  // We use rawNetwork (the original exchange string) where the exchange API
+  // requires their specific format, falling back to canonical if rawNetwork
+  // is not available (e.g. for static/fallback data).
+  const exchangeNetworkId = rawNetwork || network;
+
   switch (exchange) {
     case 'Binance':
-      params.network = network;
+      // Binance accepts: TRX, ETH, BSC, SOL, MATIC, ARBITRUM, OPTIMISM, AVAXC
+      params.network = exchangeNetworkId;
       break;
     case 'Bybit':
-      params.chain = network;
+      // Bybit uses 'chain' param with their own IDs: TRX, ETH, BSC, SOL, etc.
+      params.chain = exchangeNetworkId;
       break;
     case 'MEXC':
-      params.network = network;
+      // MEXC uses 'network' with their IDs: TRC20, ERC20, BEP20, etc.
+      params.network = exchangeNetworkId;
       break;
     case 'HTX':
-      params.chain = network.toLowerCase();
+      // HTX uses lowercase chain names: trx, eth, bsc, sol, etc.
+      params.chain = exchangeNetworkId.toLowerCase();
       break;
     case 'KuCoin':
-      params.chain = network.toLowerCase();
+      // KuCoin uses lowercase chain: trx, eth, bsc, sol, etc.
+      params.chain = exchangeNetworkId.toLowerCase();
       if (tag) params.memo = tag;
       break;
     case 'BitMart':
-      params.destination_tag = tag;
+      // BitMart uses network param
+      params.network = exchangeNetworkId;
+      if (tag) params.destination_tag = tag;
       break;
     case 'Bitget':
-      params.chain = network;
+      // Bitget uses chain param with their IDs: TRC20, ERC20, BEP20, etc.
+      params.chain = exchangeNetworkId;
       break;
     case 'Gate.io':
-      params.chain = network;
+      // Gate.io uses chain param: TRX, ETH, BSC, SOL, etc.
+      params.chain = exchangeNetworkId;
       break;
   }
 
@@ -358,7 +395,8 @@ export async function withdraw(exchange, amount, address, network, tag) {
     txId:         result.txid,
     amount:       result.amount,
     fee:          result.fee?.cost,
-    network,
+    network,        // canonical
+    rawNetwork:   exchangeNetworkId,
     status:       result.status,
     timestamp:    result.timestamp ?? Date.now(),
   };
@@ -399,3 +437,4 @@ export async function internalTransfer(exchange, amount, fromAccount, toAccount)
 }
 
 export { CCXT_CLASS_MAP };
+        
