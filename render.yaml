@@ -1,0 +1,51 @@
+# Render Web Service Configuration for ArbitrageX
+# ─────────────────────────────────────────────────────────────────────────────
+# Deploy as a Web Service (NOT static site) — Express serves both API + frontend.
+#
+# ─── KEY PERSISTENCE (IMPORTANT) ─────────────────────────────────────────────
+# ArbitrageX uses a FREE Render PostgreSQL database to store your exchange API
+# keys permanently. Keys survive server restarts, spin-downs, and redeployments.
+#
+# SETUP STEPS (do this once after first deploy):
+#
+#  Step 1 — Create a free PostgreSQL database on Render:
+#    Render Dashboard → New → PostgreSQL
+#    Name: arbitragex-db
+#    Plan: Free
+#    Click "Create Database"
+#
+#  Step 2 — Copy the Internal Database URL:
+#    On the database page → "Internal Database URL" → Copy
+#
+#  Step 3 — Add it to your Web Service environment:
+#    Web Service → Environment → Add Environment Variable:
+#    Key:   DATABASE_URL
+#    Value: <paste the Internal Database URL>
+#
+#  Step 4 — Set your encryption key:
+#    Key:   ENCRYPTION_KEY
+#    Value: <any long secret string you choose, e.g. MyArbitrageX$ecret2024!>
+#    IMPORTANT: Set this ONCE and NEVER change it.
+#               Changing it will invalidate all saved API keys.
+#
+# That is all. Connect your exchange APIs once through the Connect API window
+# and they will be stored permanently in PostgreSQL — never wiped again.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  - type: web
+    name: arbitragex
+    runtime: node
+    plan: starter          # $7/month — always-on (free tier sleeps after 15min)
+    buildCommand: npm install && npm run build
+    startCommand: node server/index.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: ENCRYPTION_KEY
+        sync: false         # Set manually in Render Dashboard — NEVER auto-generate
+      - key: DATABASE_URL
+        sync: false         # Set manually — paste Internal Database URL from Render PostgreSQL
